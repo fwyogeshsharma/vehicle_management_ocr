@@ -19,7 +19,6 @@ optional.
 """
 import json
 import logging
-import os
 import threading
 from contextlib import contextmanager
 from typing import List, Optional
@@ -28,35 +27,26 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
+from ocr import config
+
 log = logging.getLogger(__name__)
 
-# How long a claim may be held before the row is assumed abandoned. Must comfortably exceed the
-# worst case for one upload, or a slow job is handed to a second worker while the first is still
-# on it. Measured at ~10-14s per photo and at most five photos, so fifteen minutes is generous
-# on purpose.
-#
-# This is NOT a retry. A worker that was killed mid-job never got a verdict on the photo, so its
-# row goes back to QUEUED untouched -- `attempts` is not incremented and nothing is recorded
-# against it. Without that, every deploy would permanently fail whatever was in flight.
-STALE_CLAIM_MINUTES = int(os.environ.get("VM_STALE_MINUTES", "15"))
+# Declared in ocr/config.py, with every other setting and the reasoning behind this one.
+# Read through this name because the whole module already refers to it by it.
+STALE_CLAIM_MINUTES = config.STALE_CLAIM_MINUTES
 
 _pool: Optional[ConnectionPool] = None
 _pool_lock = threading.Lock()
 
 
 def dsn() -> str:
-    """The connection string, from VM_DB_URL.
+    """The connection string.
 
-    No default. A worker that silently pointed at ``localhost/postgres`` would either fail
-    obscurely or, worse, find a table of the right shape in the wrong database.
+    Assembled by :func:`ocr.config.dsn` from either ``VM_DB_URL`` or the ``VM_DATABASE_*``
+    parts, both of which may come from the ``.env`` file. Kept as a function rather than a
+    constant so a test can monkeypatch the settings and re-open a pool.
     """
-    url = os.environ.get("VM_DB_URL", "").strip()
-    if not url:
-        raise SystemExit(
-            "VM_DB_URL is not set. Example:\n"
-            "  postgresql://vm:secret@127.0.0.1:5432/vehicle_management\n"
-            "This worker reads and writes vehicle_intake directly.")
-    return url
+    return config.dsn()
 
 
 def pool() -> ConnectionPool:
@@ -240,7 +230,9 @@ def check() -> str:
             "vehicle_intake does not exist in that database. Has vehicleManagement run its "
             f"Liquibase changelog against it?\n  {e}")
     except psycopg.OperationalError as e:
-        raise SystemExit(f"Cannot reach the database at VM_DB_URL:\n  {e}")
+        # Names where we tried, without the password: "connection refused" against an
+        # unstated host is the least useful error this worker can produce.
+        raise SystemExit(f"Cannot reach the database at {config.describe_db()}:\n  {e}")
     return (f"{row['total']} intake row(s): {row['queued']} queued, "
             f"{row['processing']} in progress")
 

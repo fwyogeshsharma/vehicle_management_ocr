@@ -17,12 +17,16 @@ The schema comes from vehicleManagement's Liquibase changelog; create it with
 Skipped entirely when the variable is unset, so ``pytest tests/`` still runs everywhere.
 """
 import json
-import os
 import threading
 
 import pytest
 
-TEST_URL = os.environ.get("VM_TEST_DATABASE_URL", "").strip()
+from ocr import config
+
+# Through config, so a scratch database can be named in .env like everything else -- and so
+# this stays the ONLY variable the suite will connect to. Pointing it at VM_DB_URL would
+# truncate a real vehicle_intake.
+TEST_URL = config.TEST_DB_URL
 
 pytestmark = pytest.mark.skipif(
     not TEST_URL, reason="VM_TEST_DATABASE_URL is not set (needs a scratch PostgreSQL)")

@@ -12,27 +12,23 @@ table with two writers in two languages, which is a real cost and is spelled out
 coupling to the API's request path, and no multi-megabyte photo travelling base64-encoded
 through an HTTP response on its way to being decoded again.
 
-Everything it needs to be told::
-
-    VM_DB_URL         postgresql://user:pass@host:5432/vehicle_management   (required)
-    VM_IMAGE_BACKEND  local | gcs                                           (default local)
-    VM_IMAGE_DIR      where the local backend reads                         (default ./uploads)
-    VM_GCS_BUCKET     required when the backend is gcs
-    VM_GCS_PREFIX     optional key prefix inside the bucket
-    VM_POLL_SECONDS   how often to look for work when idle                  (default 5)
-    VM_BATCH          rows per claim                                        (default 1)
-    VM_STALE_MINUTES  when a held claim is assumed abandoned                (default 15)
+Everything it needs to be told lives in ``ocr/config.py`` -- one declaration per setting,
+with its default and the reason for it, which is the same job ``application.yml`` does on the
+Java side. Put the values in a ``.env`` file at the repo root (copy ``.env.example``) or set
+real environment variables, which win over the file. ``python worker.py --check`` prints what
+it resolved to and stops.
 
 There is no retry setting. A photo gets **one** attempt; if it fails, the row is FAILED and
 nothing automatic will look at it again -- only a human pressing Read again in the worklist.
 See ``ocr/db.py:record_failure`` for why.
 """
 import logging
-import os
 import signal
 import sys
 import time
+from typing import Optional
 
+from ocr import config
 from ocr import db
 from ocr.engine import PaddleEngine
 from ocr.pipeline import read_truck
@@ -40,8 +36,8 @@ from ocr.storage import get_storage
 
 log = logging.getLogger("worker")
 
-POLL_SECONDS = float(os.environ.get("VM_POLL_SECONDS", "5"))
-BATCH = int(os.environ.get("VM_BATCH", "1"))
+POLL_SECONDS = config.POLL_SECONDS
+BATCH = config.BATCH
 
 _running = True
 
@@ -101,17 +97,31 @@ def process(engine, job: dict) -> None:
             log.exception("could not record the failure of intake %s", intake_id)
 
 
-def main() -> int:
+def main(argv: Optional[list] = None) -> int:
     logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                         format="%(asctime)s %(levelname)-7s %(name)s  %(message)s")
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
+
+    check_only = "--check" in (sys.argv[1:] if argv is None else argv)
+
+    # What we resolved to, always -- including which .env was read. "I changed .env and nothing
+    # happened" is nearly always a worker that loaded a different one, or none at all, and that
+    # is invisible unless the worker says so out loud.
+    log.info("%s", config.describe())
 
     # Prove the database and the object store BEFORE loading a gigabyte of models: both of these
     # are one-line misconfigurations, and finding out about them after a 30-second model load is
     # a slow way to learn you typed the bucket name wrong.
     log.info("database: %s", db.check())
     log.info("photo storage: %s", get_storage().describe())
+
+    if check_only:
+        # --check stops here on purpose: everything above is configuration, everything below
+        # costs half a minute of model loading and then starts taking work off the queue.
+        log.info("--check: configuration is good, not starting the loop")
+        db.close()
+        return 0
 
     # Load the models before the first poll, so a missing or broken model is a loud failure at
     # startup rather than a per-job error nobody reads. FreightDesk loads lazily and silently

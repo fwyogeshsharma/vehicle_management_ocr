@@ -18,9 +18,10 @@ or rebuilds one. That discipline is what let FreightDesk change its object layou
 migration, and it is what lets the same key resolve here and in the Java service.
 """
 import logging
-import os
 from pathlib import Path
 from typing import Optional
+
+from ocr import config
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ class LocalStorage:
     """Photos on local disk. Only correct when the API writes to the same filesystem."""
 
     def __init__(self, base_dir: Optional[str] = None):
-        self.base = Path(base_dir or os.environ.get("VM_IMAGE_DIR") or "./uploads").resolve()
+        self.base = Path(base_dir or config.IMAGE_DIR).resolve()
 
     def get(self, key: str) -> Optional[bytes]:
         p = (self.base / key).resolve()
@@ -48,7 +49,7 @@ class GCSStorage:
     """Photos in a Google Cloud Storage bucket. The same bucket the Java API writes to."""
 
     def __init__(self, bucket: Optional[str] = None, prefix: Optional[str] = None):
-        bucket = bucket or os.environ.get("VM_GCS_BUCKET")
+        bucket = bucket or config.GCS_BUCKET
         if not bucket:
             raise ValueError("VM_GCS_BUCKET must be set when VM_IMAGE_BACKEND=gcs")
         # Imported here, not at module scope, so local development needn't install the SDK.
@@ -56,8 +57,7 @@ class GCSStorage:
 
         self._bucket_name = bucket
         self._bucket = storage.Client().bucket(bucket)
-        self.prefix = (prefix if prefix is not None
-                       else os.environ.get("VM_GCS_PREFIX", "")).strip("/")
+        self.prefix = (prefix if prefix is not None else config.GCS_PREFIX).strip("/")
 
     def get(self, key: str) -> Optional[bytes]:
         name = f"{self.prefix}/{key}" if self.prefix else key
@@ -82,7 +82,7 @@ def get_storage():
     """
     global _storage
     if _storage is None:
-        backend = os.environ.get("VM_IMAGE_BACKEND", "local").strip().lower()
+        backend = config.IMAGE_BACKEND
         if backend == "gcs":
             _storage = GCSStorage()
         elif backend == "local":

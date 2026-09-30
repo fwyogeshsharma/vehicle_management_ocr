@@ -51,13 +51,35 @@ decoded again.
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 
-set VM_DB_URL=postgresql://postgres:pw@127.0.0.1:5432/vehicle_management
+copy .env.example .env
+:: edit .env -- at minimum VM_DATABASE_PASSWORD
+
+.venv\Scripts\python worker.py --check      :: print the resolved configuration and stop
 .venv\Scripts\python worker.py
 ```
 
+### Configuration
+
+Every setting is declared once in **`ocr/config.py`**, with its default and the reason for it.
+That file is this repository's `application.yml`, and the precedence is the same as Spring's:
+
+1. a real environment variable
+2. a line in `.env` at the repo root
+3. the default in `ocr/config.py`
+
+`.env` is gitignored and `.env.example` is the committed copy, so a container or a systemd unit
+sets real variables and they win — a laptop's `.env` can never beat deployed configuration.
+Point `VM_ENV_FILE` elsewhere to run two workers against two databases on one machine.
+
 | Variable | Default | |
 |---|---|---|
-| `VM_DB_URL` | *(required)* | the database holding `vehicle_intake`. No default on purpose — a worker that quietly pointed at the wrong database would find a table of the right shape |
+| `VM_DATABASE_HOST` | `127.0.0.1` | not `localhost`: on Windows that resolves to `::1` first and a Docker-published Postgres listens on IPv4 only |
+| `VM_DATABASE_PORT` | `5432` | |
+| `VM_DATABASE_NAME` | `vehicle_management` | must be the database the API migrates |
+| `VM_DATABASE_USER` | `postgres` | |
+| `VM_DATABASE_PASSWORD` | *(required)* | no default — see below |
+| `VM_DB_URL` | | **alternative** to the five above: one libpq string, which wins when set |
+| `VM_TEST_DATABASE_URL` | | scratch database for `pytest`. Separate on purpose — the suite truncates `vehicle_intake` |
 | `VM_IMAGE_BACKEND` | `local` | `local` or `gcs`. **Must match what the API is configured with** |
 | `VM_IMAGE_DIR` | `./uploads` | where the `local` backend reads |
 | `VM_GCS_BUCKET` | | required when the backend is `gcs` |
@@ -66,9 +88,25 @@ set VM_DB_URL=postgresql://postgres:pw@127.0.0.1:5432/vehicle_management
 | `VM_BATCH` | `1` | rows per claim |
 | `VM_STALE_MINUTES` | `15` | when a held claim is assumed abandoned |
 
+**Prefer the split `VM_DATABASE_*` form over `VM_DB_URL`.** The parts are assembled with
+`psycopg.conninfo.make_conninfo`, which quotes each value itself, so a password is written
+exactly as it is. In a URL it has to be percent-encoded: `faber@123` must become
+`faber%40123`, and getting it wrong produces a connection error naming a host nobody typed.
+
+**The password has no default, unlike `application.yml`, which defaults it to `postgres`.**
+That asymmetry is deliberate. A Spring Boot app that reaches the wrong database fails loudly —
+Liquibase checksums the changelog, Hibernate validates every entity. This worker does neither.
+It would find a `vehicle_intake` of the right shape in a stale copy and start claiming rows out
+of it, and nothing would look wrong until somebody asked where the results went.
+
+`worker.py --check` resolves everything, names the `.env` it actually read, proves the database
+and the object store, and stops without loading the models. Use it first: "I edited `.env` and
+nothing changed" is nearly always a worker that read a different one, or none.
+
 The worker proves the database and the object store **before** loading the models, because both
 are one-line misconfigurations and finding out after a 30-second model load is a slow way to
-learn you typed the bucket name wrong.
+learn you typed the bucket name wrong. Neither the startup summary nor any error message ever
+prints the password; `test_config.py` pins that.
 
 ### There is no automatic retry
 
@@ -94,10 +132,10 @@ Two things are deliberately *not* treated as failures:
   nothing to offer, and the human can still see the photo.
 
 ```bat
-.venv\Scripts\python -m pytest tests/ -q     :: 31 tests, no database or models needed
+.venv\Scripts\python -m pytest tests/ -q     :: 57 tests, no database or models needed
 
 :: The queue tests need a SCRATCH PostgreSQL -- they TRUNCATE vehicle_intake.
-:: Never point this at the database the application is using.
+:: Never point this at the database the application is using. It may go in .env.
 set VM_TEST_DATABASE_URL=postgresql://postgres:pw@127.0.0.1:5432/vm_ocr_test
 .venv\Scripts\python -m pytest tests/test_db.py -v
 
