@@ -1,0 +1,19 @@
+# Pinned to what was actually measured working on 2026-09-24 (Windows, Python 3.12, CPU).
+# See README.md "Why these exact versions" before changing any of them.
+paddlepaddle==3.3.1
+paddleocr==3.7.0
+opencv-contrib-python==4.10.0.84
+numpy==2.3.5
+
+# The queue. This worker reads and writes vehicle_intake directly, so it needs a driver and a
+# small pool -- see ocr/db.py for the claim and for why it is not an HTTP call any more.
+psycopg[binary]==3.2.3
+psycopg-pool==3.2.4
+
+# The 'gcs' photo backend. Imported lazily in ocr/storage.py, so a local-disk worker that never
+# touches a bucket does not pay for it at import time -- but it is pinned here because a
+# production worker has no other way to reach the photos.
+google-cloud-storage==2.19.0
+
+# Tests only
+pytest==8.3.4
