@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+samples/*.jpg
+.pytest_cache/
+
+# Local configuration, including the database password. .env.example is the committed copy.
+.env

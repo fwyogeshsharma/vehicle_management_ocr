@@ -15,5 +15,10 @@ psycopg-pool==3.2.4
 # production worker has no other way to reach the photos.
 google-cloud-storage==2.19.0
 
+# Reads the .env file at the repo root into the environment, so the database password is not
+# something every shell has to export by hand. Does NOT override a real environment variable,
+# which is what keeps a laptop's .env from beating a container's configuration.
+python-dotenv==1.0.1
+
 # Tests only
 pytest==8.3.4

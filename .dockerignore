@@ -1,0 +1,11 @@
+.git
+.idea
+.venv
+__pycache__
+*.pyc
+.env
+tests
+uploads
+benchmark.py
+probe_paddle.py
+README.md
