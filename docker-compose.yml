@@ -1,0 +1,20 @@
+services:
+  ocr-worker:
+    build: .
+    image: vehicle-management-ocr:latest
+    container_name: vehicle-ocr-worker
+    restart: unless-stopped
+    # Host networking so 127.0.0.1 inside the container is the VM, where PostgreSQL lives.
+    # No ports are published: this is a poller, not a web service.
+    network_mode: host
+    stop_grace_period: 60s   # lets the current photo finish on `docker compose down`
+    env_file: .env
+    environment:
+      VM_DB_URL: postgresql://${DB_USER}:${DB_PASSWORD}@127.0.0.1:${DB_PORT:-5432}/${DB_NAME}
+      VM_IMAGE_DIR: /app/uploads
+    volumes:
+      # Only used when VM_IMAGE_BACKEND=local. Point IMAGE_HOST_DIR at the folder the API writes to.
+      - ${IMAGE_HOST_DIR:-./uploads}:/app/uploads:ro
+      # For VM_IMAGE_BACKEND=gcs: mount a service-account key and set
+      # GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcs.json in .env
+      # - ./gcs.json:/secrets/gcs.json:ro
