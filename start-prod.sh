@@ -7,7 +7,20 @@ say() { printf '\n==> %s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 command -v docker >/dev/null || die "docker is not installed"
-docker compose version >/dev/null 2>&1 || die "the docker compose plugin is not installed"
+
+# Works with either the classic `docker-compose` (v1) or the `docker compose` plugin.
+# If neither is there, install the classic one from the distro repo.
+detect_compose() {
+  if command -v docker-compose >/dev/null 2>&1; then DC="docker-compose"
+  elif docker compose version >/dev/null 2>&1; then DC="docker compose"
+  else return 1; fi
+}
+if ! detect_compose; then
+  say "docker-compose not found; installing it with apt"
+  apt-get update -y && apt-get install -y docker-compose || die "could not install docker-compose"
+  detect_compose || die "docker-compose still not available"
+fi
+say "Using: $DC"
 
 # Pull the latest code unless told not to.
 if [[ "${1:-}" != "--no-pull" && -d .git ]]; then
@@ -40,27 +53,28 @@ say "Checking PostgreSQL on 127.0.0.1:${DB_PORT:-5432}"
 
 # Build and start
 say "Building image (first build takes several minutes)"
-docker compose build
+$DC build
 
 say "Starting worker"
-docker compose up -d --remove-orphans
+$DC down --remove-orphans >/dev/null 2>&1 || true
+$DC up -d
 
 # The worker checks DB + storage, loads models, then logs "polling". Wait for that.
 say "Waiting for the worker to come up"
 for _ in $(seq 1 60); do
   state=$(docker inspect -f '{{.State.Status}}' vehicle-ocr-worker 2>/dev/null || echo missing)
   if [[ "$state" != "running" ]]; then
-    docker compose logs --tail 40 ocr-worker
+    $DC logs --tail 40 ocr-worker
     die "worker is $state -- see the log above"
   fi
-  if docker compose logs ocr-worker 2>&1 | grep -q "polling every"; then
+  if $DC logs ocr-worker 2>&1 | grep -q "polling every"; then
     say "Worker is up"
-    docker compose logs --tail 15 ocr-worker
+    $DC logs --tail 15 ocr-worker
     docker image prune -f >/dev/null
-    printf '\nFollow logs:  docker compose logs -f ocr-worker\nStop:         docker compose down\n'
+    printf '\nFollow logs:  %s logs -f ocr-worker\nStop:         %s down\n' "$DC" "$DC"
     exit 0
   fi
   sleep 2
 done
-docker compose logs --tail 40 ocr-worker
+$DC logs --tail 40 ocr-worker
 die "worker did not start polling within 2 minutes"
