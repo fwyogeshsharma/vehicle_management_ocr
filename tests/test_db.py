@@ -37,7 +37,9 @@ psycopg = pytest.importorskip("psycopg")
 @pytest.fixture()
 def db(monkeypatch):
     """A clean table and a fresh module-level pool for every test."""
-    monkeypatch.setenv("VM_DB_URL", TEST_URL)
+    # config parses the environment once, at import: setenv here would leave the pool on
+    # whatever .env names -- the real database. Patch the parsed value instead.
+    monkeypatch.setattr(config, "DB_URL", TEST_URL)
     from ocr import db as module
 
     module.close()
@@ -143,8 +145,8 @@ class TestResults:
 
     def test_success_writes_the_reads_and_marks_it_done(self, db):
         intake_id = queue_one()
-        db.claim(1)
-        db.record_success(intake_id, {
+        job, = db.claim(1)
+        db.record_success(job, {
             "plate": "PB10ES8185", "phones": ["9878770969", "8437036313"],
             "company": "GURU NANAK ROADCARRIER",
             "plate_confidence": "LOW", "raw": {"body_texts": ["GURU NANAK"]},
@@ -168,8 +170,8 @@ class TestResults:
         read a plate the engine could not.
         """
         intake_id = queue_one()
-        db.claim(1)
-        db.record_success(intake_id, {"plate": None, "phones": [], "company": None,
+        job, = db.claim(1)
+        db.record_success(job, {"plate": None, "phones": [], "company": None,
                                       "plate_confidence": "NONE", "raw": {}})
         row = read(intake_id)
         assert row["processing_status"] == "DONE"
@@ -183,8 +185,8 @@ class TestResults:
         the row is retried until it FAILS -- losing the plate and the phone number as well.
         """
         intake_id = queue_one()
-        db.claim(1)
-        db.record_success(intake_id, {
+        job, = db.claim(1)
+        db.record_success(job, {
             "plate": "PB10ES8185", "phones": ["9878770969"], "company": "X" * 400,
             "plate_confidence": "LOW", "raw": {},
         })
@@ -201,8 +203,8 @@ class TestResults:
         CSR with the picture open settles it in seconds.
         """
         intake_id = queue_one()
-        db.claim(1)
-        db.record_failure(intake_id, "the store blinked")
+        job, = db.claim(1)
+        db.record_failure(job, "the store blinked")
 
         row = read(intake_id)
         assert row["processing_status"] == "FAILED"
@@ -216,8 +218,8 @@ class TestResults:
     def test_only_a_human_can_put_a_failed_row_back(self, db):
         """What the Retry button writes. Nothing in this module does it."""
         intake_id = queue_one()
-        db.claim(1)
-        db.record_failure(intake_id, "no")
+        job, = db.claim(1)
+        db.record_failure(job, "no")
         assert db.claim(1) == []
 
         with psycopg.connect(TEST_URL, autocommit=True) as conn:
@@ -249,16 +251,52 @@ class TestResults:
 
     def test_a_failed_row_is_not_claimed_again(self, db):
         intake_id = queue_one()
-        db.claim(1)
-        db.record_failure(intake_id, "unreadable")
+        job, = db.claim(1)
+        db.record_failure(job, "unreadable")
         assert read(intake_id)["processing_status"] == "FAILED"
         assert db.claim(1) == []
 
     def test_a_long_error_is_truncated_rather_than_raising(self, db):
         intake_id = queue_one()
-        db.claim(1)
-        db.record_failure(intake_id, "!" * 900)
+        job, = db.claim(1)
+        db.record_failure(job, "!" * 900)
         assert len(read(intake_id)["processing_error"]) == 500
+
+
+class TestOwnership:
+    """A result is written only while the row is still this claim's.
+
+    A job that outlives the staleness cutoff has its row reclaimed by another worker. Without
+    the claimed_at check both workers write, and the later one wins -- a late FAILED over a DONE.
+    """
+
+    def test_a_reclaimed_rows_late_result_is_dropped(self, db):
+        intake_id = queue_one()
+        first, = db.claim(1)
+        with psycopg.connect(TEST_URL, autocommit=True) as conn:
+            conn.execute("UPDATE vehicle_intake SET claimed_at = now() - make_interval(mins => %s)"
+                         " WHERE id = %s", (db.STALE_CLAIM_MINUTES + 1, intake_id))
+        second, = db.claim(1)
+        assert second["id"] == intake_id
+
+        assert db.record_success(second, {"plate": "PB10ES8185", "phones": [], "company": None,
+                                          "plate_confidence": "LOW", "raw": {}})
+        assert not db.record_failure(first, "the slow worker gave up")
+
+        row = read(intake_id)
+        assert row["processing_status"] == "DONE"
+        assert row["ocr_plate"] == "PB10ES8185"
+        assert row["attempts"] == 0
+
+    def test_a_result_for_a_row_re_queued_meanwhile_is_dropped(self, db):
+        intake_id = queue_one()
+        job, = db.claim(1)
+        with psycopg.connect(TEST_URL, autocommit=True) as conn:
+            conn.execute("UPDATE vehicle_intake SET processing_status = 'QUEUED', claimed_at = NULL"
+                         " WHERE id = %s", (intake_id,))
+        assert not db.record_success(job, {"plate": "X", "phones": [], "company": None,
+                                           "plate_confidence": "LOW", "raw": {}})
+        assert read(intake_id)["processing_status"] == "QUEUED"
 
 
 class TestBoundary:
@@ -273,8 +311,8 @@ class TestBoundary:
         intake_id = queue_one(reported_by="a field executive", reported_plate="PB10ES8185")
         before = read(intake_id)
 
-        db.claim(1)
-        db.record_success(intake_id, {"plate": "WC32KN7996", "phones": ["9878770969"],
+        job, = db.claim(1)
+        db.record_success(job, {"plate": "WC32KN7996", "phones": ["9878770969"],
                                       "company": None, "plate_confidence": "LOW", "raw": {}})
         after = read(intake_id)
 
@@ -312,7 +350,9 @@ def test_check_fails_loudly_when_the_table_is_missing(monkeypatch):
     """A worker that only discovers this at the first job looks exactly like a quiet queue."""
     from ocr import db as module
     module.close()
-    monkeypatch.setenv("VM_DB_URL", TEST_URL)
+    # config parses the environment once, at import: setenv here would leave the pool on
+    # whatever .env names -- the real database. Patch the parsed value instead.
+    monkeypatch.setattr(config, "DB_URL", TEST_URL)
     with psycopg.connect(TEST_URL, autocommit=True) as conn:
         conn.execute("ALTER TABLE vehicle_intake RENAME TO vehicle_intake_hidden")
     try:

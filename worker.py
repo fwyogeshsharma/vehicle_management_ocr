@@ -75,12 +75,13 @@ def process(engine, job: dict) -> None:
     try:
         images = fetch_images(job.get("image_keys"))
         if not images:
-            db.record_failure(intake_id, "none of the uploaded photos could be read from storage")
+            db.record_failure(job, "none of the uploaded photos could be read from storage")
             log.warning("intake %s failed: no usable photos", intake_id)
             return
         started = time.time()
         fields = read_truck(engine, images)
-        db.record_success(intake_id, fields)
+        if not db.record_success(job, fields):
+            return
         log.info("intake %s DONE in %.1fs (plate=%s phone=%s)", intake_id,
                  time.time() - started, fields.get("plate"), fields.get("phone"))
     except Exception as e:
@@ -88,7 +89,7 @@ def process(engine, job: dict) -> None:
         # the end of it -- there is no second attempt.
         log.exception("intake %s failed", intake_id)
         try:
-            db.record_failure(intake_id, str(e))
+            db.record_failure(job, str(e))
         except Exception:
             # Could not even record the failure, so the row is still PROCESSING and this worker
             # is the only one that knows. Leaving it is right: the claim goes stale and the next

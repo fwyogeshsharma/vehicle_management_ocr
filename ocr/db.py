@@ -94,7 +94,9 @@ def claim(limit: int = 1) -> List[dict]:
        are released at commit, so a claim that selected in one transaction and updated in
        another has a window where a second worker can select the same ids.
 
-    Returns the claimed rows, each a dict with ``id`` and ``image_keys``.
+    Returns the claimed rows, each a dict with ``id``, ``image_keys`` and ``claimed_at``. Hand
+    the whole dict back to ``record_success`` / ``record_failure``: ``claimed_at`` is what proves
+    the row is still this claim's to write.
     """
     with _tx() as conn:
         reclaimed = conn.execute(
@@ -122,18 +124,37 @@ def claim(limit: int = 1) -> List[dict]:
             return []
 
         ids = [r["id"] for r in rows]
-        conn.execute(
+        stamped = conn.execute(
             """
             UPDATE vehicle_intake
                SET processing_status = 'PROCESSING', claimed_at = now()
              WHERE id = ANY(%s)
+            RETURNING id, claimed_at
             """,
-            (ids,))
+            (ids,)).fetchall()
+        claimed_at = {r["id"]: r["claimed_at"] for r in stamped}
+        for r in rows:
+            r["claimed_at"] = claimed_at[r["id"]]
         return rows
 
 
-def record_success(intake_id: int, fields: dict) -> None:
-    """Write what OCR read and mark the job DONE.
+# Every result write is conditional on the claim still being ours. If this job outlived the
+# staleness cutoff, another worker may have reclaimed the row (new claimed_at) or a human may
+# have re-queued it; an unconditional write would then let a late FAILED overwrite a DONE, or
+# a stale read overwrite a fresh one. A write that matches nothing is dropped and logged.
+_STILL_OURS = "id = %s AND processing_status = 'PROCESSING' AND claimed_at = %s"
+
+
+def _dropped(job: dict, what: str) -> bool:
+    log.warning("intake %s: %s not saved -- the row is no longer this worker's claim "
+                "(reclaimed after the staleness cutoff, or re-queued)", job["id"], what)
+    return False
+
+
+def record_success(job: dict, fields: dict) -> bool:
+    """Write what OCR read and mark the job DONE. ``job`` is the dict ``claim`` returned.
+
+    Returns False, writing nothing, if the row is no longer this claim's (see ``_STILL_OURS``).
 
     **DONE means "the machine has finished", not "the machine found something".** A photo that
     yielded nothing still lands here, because a CSR can very often read a plate the engine
@@ -145,7 +166,7 @@ def record_success(intake_id: int, fields: dict) -> None:
     to be a 1. Silently dropping it would leave them typing it off the photo instead.
     """
     with _tx() as conn:
-        conn.execute(
+        written = conn.execute(
             """
             UPDATE vehicle_intake
                SET processing_status = 'DONE',
@@ -157,8 +178,7 @@ def record_success(intake_id: int, fields: dict) -> None:
                    ocr_company       = %s,
                    ocr_confidence    = %s,
                    ocr_raw           = %s::jsonb
-             WHERE id = %s
-            """,
+             WHERE """ + _STILL_OURS,
             (_fit(fields.get("plate"), 32),
              # Every number found, not just the best-read one. A truck carries several and a
              # telecaller who cannot reach the first needs the second.
@@ -166,11 +186,14 @@ def record_success(intake_id: int, fields: dict) -> None:
              _fit(fields.get("company"), 160),
              _fit(fields.get("plate_confidence"), 8),
              json.dumps(fields.get("raw") or {}),
-             intake_id))
+             job["id"], job["claimed_at"])).rowcount
+    return bool(written) or _dropped(job, "result")
 
 
-def record_failure(intake_id: int, message: str) -> None:
-    """Give up on this photo. One attempt, no retry.
+def record_failure(job: dict, message: str) -> bool:
+    """Give up on this photo. One attempt, no retry. ``job`` is the dict ``claim`` returned.
+
+    Returns False, writing nothing, if the row is no longer this claim's (see ``_STILL_OURS``).
 
     **A failure here is final.** Whatever went wrong -- the photo would not decode, it was not in
     the store, the engine raised -- the row goes straight to FAILED and no worker will look at it
@@ -189,7 +212,7 @@ def record_failure(intake_id: int, message: str) -> None:
     the same verdict. A CSR looking at the picture settles it in seconds.
     """
     with _tx() as conn:
-        conn.execute(
+        written = conn.execute(
             """
             UPDATE vehicle_intake
                SET processing_status = 'FAILED',
@@ -197,9 +220,9 @@ def record_failure(intake_id: int, message: str) -> None:
                    processing_error  = %s,
                    claimed_at        = NULL,
                    processed_at      = now()
-             WHERE id = %s
-            """,
-            (_fit(message, 500), intake_id))
+             WHERE """ + _STILL_OURS,
+            (_fit(message, 500), job["id"], job["claimed_at"])).rowcount
+    return bool(written) or _dropped(job, "failure")
 
 
 def _fit(value, length: int):
